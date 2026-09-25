@@ -3,9 +3,9 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/wait.h>
-#include "parser.h" // Include the professor's parsing module
+#include "parser.h"
 
-#define MAX_LINE 1024 // Maximum characters allowed for a single command input
+#define MAX_LINE 1024 // 1024 char limit for user input to prevent buffer overflow
 
 // Checks if the command is a built-in function that the shell must run itself
 static int handle_builtin(char **args)
@@ -16,18 +16,17 @@ static int handle_builtin(char **args)
     }
 
     // If the user types "cd", change the shell's working directory
-    // This must be a built-in because chdir only affects the calling process[cite: 7, 8]
     if (strcmp(args[0], "cd") == 0) {
         const char *dir;
         
-        // If no directory is provided, default to the HOME environment variable
+        // If type "cd" with no args, default to home folder 
         if (args[1] == NULL) {
             dir = getenv("HOME");
         } else {
             dir = args[1];
         }
 
-        // Handle errors if HOME isn't set or the directory doesn't exist
+        // If the dir is NULL, print error; otherwise, attempt to change the directory and print error if it fails
         if (dir == NULL) {
             fprintf(stderr, "tush: cd: HOME not set\n");
         } else if (chdir(dir) != 0) {
@@ -38,63 +37,66 @@ static int handle_builtin(char **args)
     return 0; // Indicates this is not a built-in command
 }
 
-// Creates a new process to run standard commands
+// Clones the shell, load the new program into the child process, 
+// and pause the shell until the child process finishes executing
 static void run_command(const char *path, char **args)
 {
-    // Create a duplicate of the shell process[cite: 7, 8]
+    // Asks the OS to create a dup of the current process 
+    //PID for child is 0, for parent is > 0, and < 0 if fork fails
     pid_t pid = fork();
 
-    if (pid < 0) {
-        perror("tush: fork"); // Fork failed
+    if (pid < 0) { 
+        perror("tush: fork"); // Error for fork failure
         return;
     }
 
-    // Child process branch: where the actual command runs[cite: 7]
+    // Runs in the child process branch: replace the child with the new program
     if (pid == 0) {
-        execv(path, args); // Replace the child process with the new program[cite: 7, 8]
-        perror("tush"); // This line is only reached if execv fails to load the program[cite: 7, 8]
+        execv(path, args); // Wipes child's memory and loads the new program into it
+        perror("tush"); // If execv returns, it failed, so print an error message
         exit(1);
     }
 
-    // Parent process branch: pause the shell and wait for the child to finish[cite: 7, 8]
+    // Parent process branch: pause the shell and wait for the child to finish
+    // If this didn't exist, the tush> prompt would return in the middle of the ls output
     int status;
-    if (waitpid(pid, &status, 0) < 0) {
+    if (waitpid(pid, &status, 0) < 0) { // Wait for the child process to finish and store its exit status
         perror("tush: waitpid");
     }
 }
 
-// Searches the PATH environment variable to find the absolute path of a command
+// Using execv requires a strict path, so we need to search the PATH environment variable for the command
 char *find_executable_path(const char *command, const char *path_env)
 {
-    if (path_env == NULL) {
+    if (path_env == NULL) { // If PATH is not set, we cannot search for the command
         return NULL;
     }
         
-    // Make a copy of PATH because strtok modifies the string it parses[cite: 7]
+    // We need to make a copy of the PATH string because strtok modifies the string it processes
     char *path_copy = strdup(path_env);
     if (path_copy == NULL) {
         perror("tush: strdup");
         return NULL;
     }
     
-    char candidate[4096]; // Buffer to hold the combined directory and command string
-    char *result = NULL;
+    char candidate[4096]; // Buffer to hold full path, 4096 is common max path length
+    char *result = NULL; // Pointer to hold the valid path if found
     
     // Loop through each directory separated by a colon
     char *dir = strtok(path_copy, ":");
-    while (dir != NULL) {
-        // Glue the directory and command together (e.g., /usr/bin + / + ls)[cite: 7]
+    while (dir != NULL) { // For each directory in PATH
+        // Glues the directory and command together to form a candidate path
         snprintf(candidate, sizeof(candidate), "%s/%s", dir, command);
         
-        // Check if the resulting file path exists and is executable[cite: 7, 8]
+        // Asks kernel if file exist and do I have exec perms
         if (access(candidate, X_OK) == 0) {
-            result = strdup(candidate); // Save the valid path
+            result = strdup(candidate); // Save the valid path 
             break;
         }
         dir = strtok(NULL, ":"); // Move to the next directory
     }
     
-    free(path_copy); // Clean up the copy to prevent memory leaks[cite: 7]
+    free(path_copy); // Clean up temp string to avoid memory leaks
     return result;
 }
 
@@ -102,10 +104,10 @@ int main(void)
 {
     char line[MAX_LINE]; // Buffer to store the raw text the user types
 
-    // Infinite loop to continuously prompt the user for input until they exit[cite: 7, 8]
+    // Infinite loop to continuously prompt the user for input until they exit
     while (1) {
         printf("tush> ");
-        fflush(stdout); // Forces the prompt to display immediately without waiting
+        fflush(stdout); // Forces the prompt to display immediately without waiting for a newline that tush> doesn't print
 
         // Read the user's input from standard input
         // If it returns NULL (pressing Ctrl+D), break the loop to exit
@@ -114,7 +116,7 @@ int main(void)
             break;
         }
 
-        // Parse the input line into a structured format using the provided parser
+        // Hands the raw text over to the parser to break it into a structured format
         CommandLine *cl = parse_command_line(line);
         
         // If the line was empty or just spaces, skip the rest and prompt again
@@ -122,20 +124,20 @@ int main(void)
             continue; 
         }
 
-        // print_command_line(cl); // Component 1 output, turned off for the self-check
 
-        char **args = cl->left.argv;
+        char **args = cl->left.argv; // Get the array of arguments from the parsed command line
         
-        // Only create a new process if the command is not a built-in[cite: 7]
+        // If the command is not a built-in, search for it in the PATH and run it
         if (!handle_builtin(args)) {
             const char *path = args[0];
             char *found = NULL;
             
-            // If there's no slash in the command, search the PATH for it[cite: 7]
+            // If there's no slash in the command, search the PATH for it
             if (strchr(args[0], '/') == NULL) {
-                found = find_executable_path(args[0], getenv("PATH"));
-                if (found == NULL) {
-                    fprintf(stderr, "tush: %s: command not found\n", args[0]);
+                // If simple command, trigger search loop to find abs path
+                found = find_executable_path(args[0], getenv("PATH")); 
+                if (found == NULL) { //Error if command is not found
+                    fprintf(stderr, "tush: %s: command not found\n", args[0]); 
                 }
                 path = found;
             }
